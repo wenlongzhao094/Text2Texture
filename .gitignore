@@ -1,6 +1,16 @@
 backup
+data
+models
+validation
 output
 code/*.pyc
+code/__pycache__
 code/miscc/*.pyc
+code/miscc/__pycache__
 .DS_Store
 .idea/
+slurm*
+*.save
+.vscode
+*.pth
+*.zip
