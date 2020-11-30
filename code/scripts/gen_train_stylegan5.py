@@ -3,8 +3,8 @@ import os
 import pdb
 import sys
 
-exp_name = '06_train_stylegan5'
-root = '/home/zezhoucheng/NLP/DF-GAN/code/experiments'
+exp_name = 'styleganMetric'
+root = '/home/wenlongzhao/Text2Texture/code/experiments'
 
 script_path = os.path.join(root, exp_name, 'scripts')
 out_dir = os.path.join(root, exp_name, 'outs')
@@ -24,8 +24,6 @@ launch_eval_script = os.path.join(script_path, 'launch_train.sh')
 f_eval_launch = open(launch_eval_script, 'w')
 f_eval_launch.write('#!/bin/bash\n')
 
-
-
 exp_name = '0-stylegan-DG-text'
 out_path = os.path.join(out_dir, exp_name)
 if not os.path.exists(out_path):
@@ -36,7 +34,7 @@ cmd_str = 'CUDA_VISIBLE_DEVICE=0 python main_stylegan5.py --mixing --out_path %s
 with open(sh_filename, 'w') as f:
     f.write('#!/bin/bash\n')
     f.write(cmd_str)
-f_eval_launch.write('sbatch -p 1080ti-long -o %s --gres=gpu:1 --mem=100000 %s' % ( 
-                    slurm_dir+'/'+slurm_name+'_%J.out', sh_filename + '\n'))
 
+f_eval_launch.write('sbatch -p 2080ti-long -o %s --gres=gpu:1 --mem=100000 %s' % (
+                    slurm_dir+'/'+slurm_name+'_%J.out', sh_filename + '\n'))
 

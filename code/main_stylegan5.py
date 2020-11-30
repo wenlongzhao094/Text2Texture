@@ -17,25 +17,31 @@ from torch import nn, optim
 from torch.nn import functional as F
 from torch.autograd import Variable, grad
 from torch.utils.data import DataLoader
-from torchvision import datasets, transforms, utils
+from torchvision import datasets, utils
+import torch.backends.cudnn as cudnn
+import torchvision.utils as vutils
+import torchvision.transforms as transforms
 
 # from model import StyledGenerator, Discriminator
-
+# from datasets import TextDataset
+# from datasets import prepare_data
+# from DAMSM import RNN_ENCODER
 from miscc.utils import mkdir_p
+
 from miscc.config import cfg, cfg_from_file
-from datasets import TextDataset
-from datasets import prepare_data
-from DAMSM import RNN_ENCODER
-import torch.backends.cudnn as cudnn
-import torchvision.transforms as transforms
-from styleGAN5 import StyledGenerator 
+from metric_learning.triplet_match.config_default import C as metric_cfg
+from metric_learning.triplet_match.config_default import prepare
+from metric_learning.data_api.dataset_api import ImgOnlyDataset, PhraseOnlyDataset, WordEncoder
+from metric_learning.data_api.eval_retrieve import log_to_summary
+from metric_learning.triplet_match.dataset import TripletTrainData
+from metric_learning.triplet_match.model import TripletMatch
+from metric_learning.layers.img_encoder import build_transforms
+from styleGAN5 import StyledGenerator
 from styleGAN5 import Discriminator 
-import torchvision.utils as vutils
 from utils import requires_grad, accumulate, sample_data, adjust_lr
 
 
-
-def train(args, loader, generator, discriminator, text_encoder):
+def train(args, loader, generator, discriminator, metric_model):
     
     step = int(math.log2(args.init_size)) - 2 # fixed init_size and max_size to 64, i.e. step=4
     resolution = 4 * 2 ** step # always equal to 64
@@ -85,26 +91,31 @@ def train(args, loader, generator, discriminator, text_encoder):
             adjust_lr(g_optimizer, args.lr.get(resolution, 0.001))
             adjust_lr(d_optimizer, args.lr.get(resolution, 0.001))
         try:
-            data = next(data_loader)
+            real_image, pos_langs, neg_imgs, neg_langs = next(data_loader)
         except (OSError, StopIteration):
             data_loader = iter(loader)
-            data = next(data_loader)
+            real_image, pos_langs, neg_imgs, neg_langs = next(data_loader)
 
-        imags, captions, cap_lens, class_ids, keys = prepare_data(data)
-        hidden = text_encoder.init_hidden(batch_size)
+        # imags, captions, cap_lens, class_ids, keys = prepare_data(data)
+
+        # hidden = text_encoder.init_hidden(batch_size)
         # words_embs: batch_size x nef x seq_len
         # sent_emb: batch_size x nef
-        words_embs, sent_emb = text_encoder(captions, cap_lens, hidden)
-        words_embs, sent_emb = words_embs.detach(), sent_emb.detach()
-        real_image = imags[0]
-    
+        # words_embs, sent_emb = text_encoder(captions, cap_lens, hidden)
+        # words_embs, sent_emb = words_embs.detach(), sent_emb.detach()
+        # real_image = imags[0]
+
+        sent_emb = metric_model.get_text_embeddings(pos_langs)
+        sent_emb = sent_emb.detach()
+
         # --------------------------- start training -------------------------
         used_sample += real_image.shape[0]
         b_size = real_image.size(0)
         real_image = real_image.cuda()
+        neg_imgs = neg_imgs.cuda()
 
         if args.loss == 'wgan-gp':
-            real_predict = discriminator(real_image, sent_emb, step=step, alpha=alpha) 
+            real_predict = discriminator(real_image, sent_emb, step=step, alpha=alpha)
             real_predict = real_predict.mean() - 0.001 * (real_predict ** 2).mean()
             (-real_predict).backward()
 
@@ -144,7 +155,7 @@ def train(args, loader, generator, discriminator, text_encoder):
             gen_in2 = torch.cat((gen_in2, sent_emb), 1)
 
         fake_image = generator(gen_in1, step=step, alpha=alpha)
-        fake_predict = discriminator(fake_image, sent_emb, step=step, alpha=alpha) 
+        fake_predict = discriminator(fake_image, sent_emb, step=step, alpha=alpha)
 
         if args.loss == 'wgan-gp':
             fake_predict = fake_predict.mean()
@@ -179,6 +190,8 @@ def train(args, loader, generator, discriminator, text_encoder):
             elif args.loss == 'r1':
                 loss = F.softplus(-predict).mean()
             gen_loss_val = loss.item()
+            # metric learning loss for text-texture matching
+            loss += metric_model.inference_forward(fake_image, sent_emb, neg_imgs=neg_imgs, verbose=True)
             loss.backward()
             g_optimizer.step()
             accumulate(g_running, generator.module)
@@ -224,33 +237,81 @@ if __name__ == '__main__':
     parser.add_argument('--out_path', type=str, help='output path')
     parser.add_argument('--model_path', type=str, help='checkpoint dir')
     parser.add_argument('--cfg', type=str, default='cfg/texture.yml')
+    parser.add_argument('--metric_cfg_file', type=str, default=None)
     parser.add_argument('--data_dir', type=str, default='../data/texture', help='data_path')
-    parser.add_argument('--text_encoder_path', type=str, default='../DAMSMencoders/texture/text_encoder550.pth', 
+    parser.add_argument('--encoder_path', type=str, default='/home/wenlongzhao/Text2Texture/metric_learning_encoders/triplet_match/encoder5_phrase_bert_lr0.00003_tuned/checkpoints/BEST_checkpoint.pth',
                             help='pretrained text encoder path')
-
     args = parser.parse_args()
-    cfg_from_file(args.cfg)
 
+    # DAMSM/GAN cfg
+    # cfg_from_file(args.cfg)
+
+    # metric learning cfg
+    if args.metric_cfg_file is not None:
+        metric_cfg.merge_from_file(args.metric_cfg_file)
+    # if args.opts is not None:
+    #     cfg.merge_from_list(args.opts)
+    prepare(metric_cfg)
+    metric_cfg.freeze()
+    print(metric_cfg.dump())
+
+    # set random seed
+    torch.manual_seed(metric_cfg.RAND_SEED)
+    np.random.seed(metric_cfg.RAND_SEED)
+    random.seed(metric_cfg.RAND_SEED)
 
     # ------------------------------ dataset ------------------------------------
-    imsize = args.imsize
-    batch_size = args.batch_size
-    image_transform = transforms.Compose([
-        transforms.Resize((imsize, imsize)),
-        transforms.RandomHorizontalFlip()])
-    if args.eval: 
-        dataset = TextDataset(args.data_dir, 'test', base_size=imsize, transform=image_transform)
-        assert dataset
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, drop_last=True, 
-                                                shuffle=True, num_workers=1)
-    else:     
-        dataset = TextDataset('../data/texture', 'train', base_size=imsize, transform=image_transform)
-        print(dataset.n_words, dataset.embeddings_num)
-        assert dataset
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, drop_last=True, 
-                                                shuffle=True, num_workers=int(1))
+    # imsize = args.imsize
+    # batch_size = args.batch_size
+    # image_transform = transforms.Compose([
+    #     transforms.Resize((imsize, imsize)),
+    #     transforms.RandomHorizontalFlip()])
+    # if args.eval:
+    #     dataset = TextDataset(args.data_dir, 'test', base_size=imsize, transform=image_transform)
+    #     assert dataset
+    #     dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, drop_last=True,
+    #                                             shuffle=True, num_workers=1)
+    # else:
+    #     dataset = TextDataset('../data/texture', 'train', base_size=imsize, transform=image_transform)
+    #     print(dataset.n_words, dataset.embeddings_num)
+    #     assert dataset
+    #     dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, drop_last=True,
+    #                                             shuffle=True, num_workers=int(1))
 
-    # ------------------------------ model ------------------------------------
+    # ------------------------------ dataset ------------------------------------
+    dataset = TripletTrainData(split=metric_cfg.TRAIN_SPLIT, neg_img=metric_cfg.LOSS.IMG_SENT_WEIGHTS[0] > 0,
+                               neg_lang=metric_cfg.LOSS.IMG_SENT_WEIGHTS[1] > 0, lang_input=metric_cfg.LANG_INPUT)
+    data_loader = DataLoader(dataset, batch_size=32, shuffle=True,
+                             drop_last=True, pin_memory=True)
+
+    img_datset = ImgOnlyDataset(split=metric_cfg.EVAL_SPLIT, transform=build_transforms(is_train=False),
+                                texture_dataset=dataset)
+    eval_img_dataloader = DataLoader(img_datset, batch_size=1, shuffle=False)
+
+    phrase_dataset = PhraseOnlyDataset(texture_dataset=dataset)
+    eval_phrase_dataloader = DataLoader(phrase_dataset, batch_size=32, shuffle=False)
+
+    # ------------------------------ metric model ------------------------------------
+
+    word_encoder = WordEncoder()
+    metric_model: TripletMatch = TripletMatch(vec_dim=metric_cfg.MODEL.VEC_DIM, neg_margin=metric_cfg.LOSS.MARGIN,
+                                       distance=metric_cfg.MODEL.DISTANCE, img_feats=metric_cfg.MODEL.IMG_FEATS,
+                                       lang_encoder_method=metric_cfg.MODEL.LANG_ENCODER, word_encoder=word_encoder)
+
+    # if metric_cfg.INIT_WORD_EMBED != 'rand' and metric_cfg.MODEL.LANG_ENCODER in ['mean', 'lstm']:
+    #     word_emb = get_word_embed(word_encoder.word_list, cfg.INIT_WORD_EMBED)
+    #     model.lang_embed.embeds.weight.data.copy_(torch.from_numpy(word_emb))
+    metric_model.load_state_dict(torch.load(args.encoder_path, map_location=lambda storage, loc: storage))
+    metric_model.eval().cuda()
+
+    if not metric_cfg.TRAIN.TUNE_RESNET:
+        metric_model.resnet_encoder.requires_grad = False
+        metric_model.resnet_encoder.eval()
+    if not metric_cfg.TRAIN.TUNE_LANG_ENCODER:
+        metric_model.lang_embed.requires_grad = False
+        metric_model.lang_embed.eval()
+
+    # ------------------------------ GAN ------------------------------------
 
     generator = nn.DataParallel(StyledGenerator(code_size, sentence_dim=args.sentence_dim)).cuda() 
     discriminator = nn.DataParallel(Discriminator(sentence_dim=args.sentence_dim)).cuda() 
@@ -263,13 +324,13 @@ if __name__ == '__main__':
     accumulate(g_running, generator.module, 0)
 
     # test encoder
-    text_encoder = RNN_ENCODER(dataset.n_words, nhidden=256)
-    state_dict = torch.load(args.text_encoder_path, map_location=lambda storage, loc: storage)
-    text_encoder.load_state_dict(state_dict)
-    text_encoder.cuda()
-    for p in text_encoder.parameters():
-        p.requires_grad = False
-    text_encoder.eval()    
+    # text_encoder = RNN_ENCODER(dataset.n_words, nhidden=256)
+    # state_dict = torch.load(args.text_encoder_path, map_location=lambda storage, loc: storage)
+    # text_encoder.load_state_dict(state_dict)
+    # text_encoder.cuda()
+    # for p in text_encoder.parameters():
+    #     p.requires_grad = False
+    # text_encoder.eval()
 
 
     # ------------------------------ hyperparameters ------------------------------------
@@ -279,10 +340,10 @@ if __name__ == '__main__':
     else:
         args.lr = {}
         args.batch = {}
-    args.gen_sample = {128:(16,16), 512: (8, 4), 1024: (4, 2), 64: (16, 16), 32: (16, 16)}
+    args.gen_sample = {128: (16,16), 512: (8, 4), 1024: (4, 2), 64: (16, 16), 32: (16, 16)}
     args.batch_default = 32
     # train(args, dataset, generator, discriminator, text_encoder)
-    train(args, dataloader, generator, discriminator, text_encoder)
+    train(args, data_loader, generator, discriminator, metric_model)
    
 
 

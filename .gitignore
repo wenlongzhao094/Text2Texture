@@ -1,5 +1,6 @@
 backup
 data
+code/metric_learning/data_api/images
 models
 validation
 output
