@@ -54,6 +54,7 @@ def train(args, loader, generator, discriminator, metric_model):
 
     disc_loss_val = 0
     gen_loss_val = 0
+    metric_loss_val = 0
     grad_loss_val = 0
     alpha = 0
     used_sample = 0
@@ -191,7 +192,11 @@ def train(args, loader, generator, discriminator, metric_model):
                 loss = F.softplus(-predict).mean()
             gen_loss_val = loss.item()
             # metric learning loss for text-texture matching
-            loss += metric_model.inference_forward(fake_image, sent_emb, neg_imgs=neg_imgs, verbose=True)
+            if args.metric_learning_loss_weight != 0:
+                metric_loss = args.metric_learning_loss_weight * metric_model.inference_forward(
+                    fake_image, sent_emb, neg_imgs=neg_imgs, interpolate=args.interpolate, verbose=True)
+                metric_loss_val = metric_loss.item()
+                loss = loss + metric_loss
             loss.backward()
             g_optimizer.step()
             accumulate(g_running, generator.module)
@@ -212,7 +217,7 @@ def train(args, loader, generator, discriminator, metric_model):
         if (i + 1) % 10000 == 0:
             torch.save(g_running.state_dict(), '%s/%06d.pth'%(args.model_path, i)) 
 
-        state_msg = (f'Size: {4 * 2 ** step}; G: {gen_loss_val:.3f}; D: {disc_loss_val:.3f};'
+        state_msg = (f'Size: {4 * 2 ** step}; G: {gen_loss_val:.3f}; M: {metric_loss_val:.3f}; D: {disc_loss_val:.3f};'
             f' Grad: {grad_loss_val:.3f}; Alpha: {alpha:.5f}')
         print(state_msg)
 
@@ -241,6 +246,11 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', type=str, default='../data/texture', help='data_path')
     parser.add_argument('--encoder_path', type=str, default='/home/wenlongzhao/Text2Texture/metric_learning_encoders/triplet_match/encoder5_phrase_bert_lr0.00003_tuned/checkpoints/BEST_checkpoint.pth',
                             help='pretrained text encoder path')
+    parser.add_argument('--lang_encoder', type=str, default='bert', help='text encoder')
+    parser.add_argument('--lang_input', type=str, default='phrase', help='phrase or description')
+    parser.add_argument('--metric_learning_loss_weight', type=float, default=1.0, help='weight on the metric learning loss against the generator loss')
+    parser.add_argument('--interpolate', action='store_true', help='interpolate the generated image and then encode into the metric space')
+
     args = parser.parse_args()
 
     # DAMSM/GAN cfg
@@ -251,7 +261,6 @@ if __name__ == '__main__':
         metric_cfg.merge_from_file(args.metric_cfg_file)
     # if args.opts is not None:
     #     cfg.merge_from_list(args.opts)
-    prepare(metric_cfg)
     metric_cfg.freeze()
     print(metric_cfg.dump())
 
@@ -280,7 +289,7 @@ if __name__ == '__main__':
 
     # ------------------------------ dataset ------------------------------------
     dataset = TripletTrainData(split=metric_cfg.TRAIN_SPLIT, neg_img=metric_cfg.LOSS.IMG_SENT_WEIGHTS[0] > 0,
-                               neg_lang=metric_cfg.LOSS.IMG_SENT_WEIGHTS[1] > 0, lang_input=metric_cfg.LANG_INPUT)
+                               neg_lang=metric_cfg.LOSS.IMG_SENT_WEIGHTS[1] > 0, lang_input=args.lang_input)
     data_loader = DataLoader(dataset, batch_size=32, shuffle=True,
                              drop_last=True, pin_memory=True)
 
@@ -296,7 +305,7 @@ if __name__ == '__main__':
     word_encoder = WordEncoder()
     metric_model: TripletMatch = TripletMatch(vec_dim=metric_cfg.MODEL.VEC_DIM, neg_margin=metric_cfg.LOSS.MARGIN,
                                        distance=metric_cfg.MODEL.DISTANCE, img_feats=metric_cfg.MODEL.IMG_FEATS,
-                                       lang_encoder_method=metric_cfg.MODEL.LANG_ENCODER, word_encoder=word_encoder)
+                                       lang_encoder_method=args.lang_encoder, word_encoder=word_encoder)
 
     # if metric_cfg.INIT_WORD_EMBED != 'rand' and metric_cfg.MODEL.LANG_ENCODER in ['mean', 'lstm']:
     #     word_emb = get_word_embed(word_encoder.word_list, cfg.INIT_WORD_EMBED)

@@ -31,8 +31,9 @@ class TripletMatch(nn.Module):
         pos_sent_vecs = self.lang_encoder(pos_sents)
         return pos_sent_vecs
 
-    def inference_forward(self, gen_imgs, pos_sent_vecs, neg_imgs=None, verbose=False):
-        gen_imgs = F.interpolate(gen_imgs, size=224)
+    def inference_forward(self, gen_imgs, pos_sent_vecs, neg_imgs=None, interpolate=False, verbose=False):
+        if interpolate:
+            gen_imgs = F.interpolate(gen_imgs, size=224)
         gen_img_vecs = self.img_encoder(gen_imgs)
         pos_dist = self.dist_fn(gen_img_vecs, pos_sent_vecs)
 

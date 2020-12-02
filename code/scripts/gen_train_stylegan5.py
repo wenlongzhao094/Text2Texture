@@ -3,7 +3,7 @@ import os
 import pdb
 import sys
 
-exp_name = 'styleganMetric'
+exp_name = 'bert_description_weight10'
 root = '/home/wenlongzhao/Text2Texture/code/experiments'
 
 script_path = os.path.join(root, exp_name, 'scripts')
@@ -30,11 +30,16 @@ if not os.path.exists(out_path):
     os.makedirs(out_path)
 sh_filename = os.path.join(script_path, 'train_%s.sh' % exp_name)
 slurm_name = sh_filename.split('/')[-1][:-3]
-cmd_str = 'CUDA_VISIBLE_DEVICE=0 python main_stylegan5.py --mixing --out_path %s --model_path %s' % (out_path, model_path)
+
+encoder_path = '/home/wenlongzhao/Text2Texture/metric_learning_encoders/triplet_match/encoder9_description_bert_lr0.0001/checkpoints/BEST_checkpoint.pth'
+cmd_str = 'CUDA_VISIBLE_DEVICE=0 python main_stylegan5.py --mixing --out_path %s --model_path %s \
+    --encoder_path %s --lang_encoder bert --lang_input description --metric_learning_loss_weight 10' \
+    % (out_path, model_path, encoder_path)
+
 with open(sh_filename, 'w') as f:
     f.write('#!/bin/bash\n')
     f.write(cmd_str)
 
-f_eval_launch.write('sbatch -p 2080ti-long -o %s --gres=gpu:1 --mem=100000 %s' % (
+f_eval_launch.write('sbatch -p 1080ti-long -o %s --gres=gpu:1 --mem=100000 %s' % (
                     slurm_dir+'/'+slurm_name+'_%J.out', sh_filename + '\n'))
 
